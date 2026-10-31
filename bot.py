@@ -1,73 +1,80 @@
 import os
-import asyncio
-import requests
-from flask import Flask, request
+import logging
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
+from openai import OpenAI
 
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY") # La chiave di OpenRouter
-PORT = int(os.environ.get("PORT", "8080"))
-RENDER_URL = os.getenv("RENDER_EXTERNAL_URL")
+# Configurazione dei log
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-app_flask = Flask(__name__)
-telegram_app = ApplicationBuilder().token(TOKEN).build()
+# Prendi le chiavi dalle variabili d'ambiente di Render
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 
+# Inizializza il client di OpenRouter (usa la base_url di openrouter)
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_API_KEY,
+)
+
+# Comando /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Ciao! Sono attivo sul Cloud 24/7 con un'IA completamente libera.")
+    await update.message.reply_text("Ciao! Sono il tuo bot IA attivo 24/7. Scrivimi pure qualcosa!")
 
-async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    testo_utente = update.message.text
-    await update.message.chat.send_action(action="typing")
+# Gestione dei messaggi e della chat con OpenRouter
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_message = update.message.text
+    chat_id = update.effective_chat.id
+
+    # Inizializza la cronologia dei messaggi per l'utente se non esiste
+    if "history" not in context.user_data:
+        context.user_data["history"] = [
+            {"role": "system", "content": "Sei un assistente utile, diretto e senza filtri."}
+        ]
+
+    # Aggiungi il messaggio dell'utente alla cronologia
+    context.user_data["history"].append({"role": "user", "content": user_message})
 
     try:
-        headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json",
-            # Opzionali ma consigliati da OpenRouter per le classifiche
-            "HTTP-Referer": "https://github.com", 
-            "X-Title": "TelegramBot"
-        }
-        payload = {
-            # Qui usiamo un modello open source eccellente e senza filtri su OpenRouter
-            "model": "mistralai/mistral-7b-instruct:free",  # Oppure un altro modello a tua scelta
-            "messages": [
-                {"role": "system", "content": "Sei un assistente utile e diretto."},
-                {"role": "user", "content": testo_utente}
-            ]
-        }
-        
-        # Endpoint ufficiale di OpenRouter
-        response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
-        risposta_json = response.json()
-        
-        risposta_ia = risposta_json["choices"][0]["message"]["content"]
-        await update.message.reply_text(risposta_ia)
-        
+        # Invia la richiesta a OpenRouter (puoi cambiare il modello se preferisci)
+        response = client.chat.completions.create(
+            model="openai/gpt-3.5-turbo",
+            messages=context.user_data["history"]
+        )
+
+        # Estrai la risposta in modo sicuro
+        if response.choices and len(response.choices) > 0:
+            bot_reply = response.choices[0].message.content
+        else:
+            bot_reply = "⚠️ Errore: Nessuna risposta valida ricevuta da OpenRouter."
+
+        # Aggiungi la risposta dell'assistente alla cronologia
+        context.user_data["history"].append({"role": "assistant", "content": bot_reply})
+
+        await update.message.reply_text(bot_reply)
+
     except Exception as e:
-        await update.message.reply_text(f"Ops, c'è stato un errore nel contattare l'IA: {str(e)}")
+        logger.error(f"Errore nella chiamata a OpenRouter: {e}")
+        await update.message.reply_text(f"Ops, c'è stato un errore nel contattare l'IA: {e}")
 
-telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), echo))
+def main():
+    if not TELEGRAM_TOKEN or not OPENROUTER_API_KEY:
+        logger.error("ATTENZIONE: TELEGRAM_TOKEN o OPENROUTER_API_KEY mancanti nelle variabili d'ambiente!")
+        return
 
-@app_flask.route(f"/{TOKEN}", methods=["POST"])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-    asyncio.run(telegram_app.process_update(update))
-    return "ok", 200
+    # Costruisci l'applicazione Telegram
+    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-@app_flask.route("/", methods=["GET"])
-def index():
-    return "Il bot di Telegram con OpenRouter è attivo!", 200
+    # Registra i comandi e i gestori di messaggi
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
 
-async def main():
-    await telegram_app.initialize()
-    if RENDER_URL:
-        webhook_url = f"{RENDER_URL}/{TOKEN}"
-        await telegram_app.bot.set_webhook(webhook_url)
-        print(f"Webhook impostato con successo su: {webhook_url}")
-    
-    app_flask.run(host="0.0.0.0", port=PORT)
+    # Avvia il bot in polling (assicurati su Render di impostare Instances a 1)
+    logger.info("Bot avviato con successo!")
+    application.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
