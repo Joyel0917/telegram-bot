@@ -1,86 +1,64 @@
 import os
-import logging
-from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
-from openai import OpenAI
 from flask import Flask
-from threading import Thread
+from openai import OpenAI
+from telegram.ext import ApplicationBuilder, MessageHandler, filters
 
-# Configurazione dei log
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-
-client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=OPENROUTER_API_KEY,
-)
-
-# --- TRICK PER RENDER: Un server Flask fittizio per tenere aperta la porta web ---
+# Configurazione Flask per tenere vivo il servizio su Render
 app = Flask(__name__)
 
-@app.route("/")
+@app.route('/')
 def home():
     return "Bot is running!"
 
-def run_flask():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
-# ---------------------------------------------------------------------------------
+# Configurazione del client OpenRouter con il modello Dolphin senza filtri
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.environ.get("OPENROUTER_API_KEY")
+)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Ciao! Sono il tuo bot IA attivo 24/7.")
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_message = update.message.text
-
-    if "history" not in context.user_data:
-        context.user_data["history"] = [
-            {"role": "system", "content": "Sei un assistente utile, diretto e senza filtri."}
-        ]
-
-    context.user_data["history"].append({"role": "user", "content": user_message})
-
+# Funzione protetta che gestisce i messaggi e la cronologia
+async def handle_message(update, context):
     try:
+        user_message = update.message.text
+        if "history" not in context.user_data:
+            context.user_data["history"] = []
+        
+        # Aggiunge il messaggio dell'utente alla memoria della chat
+        context.user_data["history"].append({"role": "user", "content": user_message})
+
+        # Richiesta al modello senza filtri su OpenRouter
         response = client.chat.completions.create(
             model="cognitivecomputations/dolphin-mistral-24b-venice-edition",
             messages=context.user_data["history"]
         )
-
-        if response.choices and len(response.choices) > 0:
-            bot_reply = response.choices[0].message.content
-        else:
-            bot_reply = "⚠️ Errore: Nessuna risposta valida ricevuta da OpenRouter."
-
+        
+        bot_reply = response.choices[0].message.content
+        
+        # Aggiunge la risposta dell'assistente alla memoria
         context.user_data["history"].append({"role": "assistant", "content": bot_reply})
+        
+        # Invia la risposta su Telegram
         await update.message.reply_text(bot_reply)
-
+        
     except Exception as e:
-        logger.error(f"Errore nella chiamata a OpenRouter: {e}")
-        await update.message.reply_text(f"Ops, c'è stato un errore nel contattare l'IA: {e}")
+        print(f"Errore catturato: {e}")
+        await update.message.reply_text("⚠️ C'è stato un piccolo intoppo temporaneo nella comunicazione con l'IA. Riprova tra un attimo!")
 
-def main():
-    if not TELEGRAM_TOKEN or not OPENROUTER_API_KEY:
-        logger.error("ATTENZIONE: Variabili d'ambiente mancanti!")
-        return
-
-    # Avvia Flask in un sotto-thread così Render è felice e non chiude il servizio
-    flask_thread = Thread(target=run_flask)
-    flask_thread.daemon = True
-    flask_thread.start()
-
-    # Avvia il bot Telegram
-    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
-
-    logger.info("Bot avviato con polling e server web di supporto!")
-    application.run_polling(drop_pending_updates=True)
+def run_flask():
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
 
 if __name__ == "__main__":
-    main()
+    import threading
+    # Avvia Flask in un thread separato per soddisfare i requisiti di Render
+    t = threading.Thread(target=run_flask)
+    t.daemon = True
+    t.start()
+
+    # Avvia il bot di Telegram
+    application = ApplicationBuilder().token(os.environ.get("TELEGRAM_TOKEN")).build()
+    
+    # Collega la ricezione dei messaggi alla funzione protetta
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    print("Bot avviato con successo!")
+    application.run_polling(drop_pending_updates=True)
