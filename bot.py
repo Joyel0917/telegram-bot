@@ -47,7 +47,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         response = client.chat.completions.create(
-            model="cognitivecomputations/dolphin-mixtral-8x7b",
+            model="cognitivecomputations/dolphin-mistral-24b-venice-edition",
             messages=context.user_data["history"]
         )
 
